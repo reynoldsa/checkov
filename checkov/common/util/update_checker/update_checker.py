@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-import pickle  # nosec
+import json
 import re
 from collections.abc import Generator, Callable
 from typing import Any
@@ -34,9 +34,10 @@ def cache_results(
             if filename is None:
                 return
 
-            with open(filename, "wb") as fp:
-                pickle.dump(cache, fp, pickle.HIGHEST_PROTOCOL)
-        except IOError:
+            with open(filename, "w") as fp:
+                json.dump(cache, fp)
+        except Exception as e:
+            print(e, file=sys.stderr)
             pass  # Ignore permacache saving exceptions
 
     def update_from_permacache() -> None:
@@ -45,18 +46,18 @@ def cache_results(
             if filename is None:
                 return
 
-            with open(filename, "rb") as fp:
-                permacache = pickle.load(fp)  # nosec
+            with open(filename, "r") as fp:
+                permacache = json.load(fp)
         except Exception:  # TODO: Handle specific exceptions
             return  # It's okay if it cannot load
         for key, value in permacache.items():
             if key not in cache or value[0] > cache[key][0]:
                 cache[key] = value
 
-    cache: dict[tuple[str, str], tuple[float, UpdateResult | None]] = {}
+    cache: dict[str, CacheEntry] = {}
     cache_expire_time = 3600
     try:
-        filename = os.path.join(gettempdir(), "update_checker_cache.pkl")
+        filename = os.path.join(gettempdir(), "update_checker_cache.json")
         update_from_permacache()
     except NotImplementedError:
         filename = None
@@ -65,13 +66,15 @@ def cache_results(
     def wrapped(obj: UpdateChecker, package_name: str, package_version: str, **extra_data: Any) -> UpdateResult | None:
         """Return cached results if available."""
         now = time.time()
-        key = (package_name, package_version)
+        key = f"{package_name}-{package_version}"
         if not obj._bypass_cache and key in cache:  # Check the in-memory cache
-            cache_time, retval = cache[key]
+            cached_version_data = cache[key]
+            cache_time = cached_version_data.time
+            retval = cached_version_data.update_result
             if now - cache_time < cache_expire_time:
                 return retval
         retval = function(obj, package_name, package_version, **extra_data)
-        cache[key] = now, retval
+        cache[key] = CacheEntry(now, retval)
         if filename:
             save_to_permacache()
         return retval
@@ -110,13 +113,22 @@ def standard_release(version: str) -> bool:
     return version.replace(".", "").isdigit()
 
 
+class CacheEntry(dict):
+    """Version cache entry data."""
+    def __init__(self, cached_time: float, update_result: UpdateResult | None) -> None:
+        dict.__init__(self, cached_time=cached_time, update_result=update_result)
+        self.time = cached_time
+        self.update_result = update_result
+
 # This class must be defined before UpdateChecker in order to unpickle objects
 # of this type
-class UpdateResult:
+class UpdateResult(dict):
     """Contains the information for a package that has an update."""
 
     def __init__(self, package: str, running: str, available: str, release_date: str | None) -> None:
         """Initialize an UpdateResult instance."""
+        # This construct is necessary to enable python's `json` module to serialize simple types such as this
+        dict.__init__(self, package=package, running=running, available=available, release_date=release_date)
         self.available_version = available
         self.package_name = package
         self.running_version = running
